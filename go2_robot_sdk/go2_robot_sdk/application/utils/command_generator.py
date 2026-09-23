@@ -8,6 +8,7 @@ Contains functions to create properly formatted WebRTC commands.
 
 import datetime
 import json
+import os
 import random
 from typing import Any, Dict, Optional, Union
 
@@ -47,7 +48,7 @@ def create_command_structure(
     param_str = json.dumps(parameter) if isinstance(parameter, dict) else str(parameter)
 
     return {
-        "type": "msg",
+        "type": "req",
         "topic": topic,
         "data": {
             "header": {
@@ -86,6 +87,21 @@ def gen_command(
         topic=topic or SPORT_MODE_TOPIC,
         command_id=command_id,
     )
+    # Keep the known-working obstacle-avoidance wire format from September 18.
+    # Request/response + no-reply movement is an explicit MCF profile, not a
+    # global change to the legacy robot command path.
+    motion_api = os.environ.get("GO2_WEBRTC_MOTION_API", "obstacles_avoid")
+    if motion_api == "obstacles_avoid":
+        command["type"] = "msg"
+    elif motion_api == "sport_mcf":
+        if (command["topic"] == SPORT_MODE_TOPIC and cmd == 1008) or (
+            command["topic"] == OBSTACLE_AVOIDANCE_TOPIC and cmd == 1003
+        ):
+            command["type"] = "msg"
+            command["data"]["header"]["policy"] = {"priority": 0, "noreply": True}
+            command["data"]["binary"] = []
+    else:
+        raise ValueError(f"Unsupported GO2_WEBRTC_MOTION_API: {motion_api}")
     return json.dumps(command)
 
 

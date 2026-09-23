@@ -24,6 +24,7 @@ find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_sensor_msgs REQUIRED)
 find_package(PCL REQUIRED)
 
 # Include directories
@@ -43,21 +44,28 @@ set(dependencies
   pcl_conversions
   tf2
   tf2_ros
+  tf2_sensor_msgs
 )
+
+# Point-cloud filtering library
+add_library(pointcloud_frame_filter src/pointcloud_frame_filter.cpp)
+target_include_directories(pointcloud_frame_filter PUBLIC include)
+target_link_libraries(pointcloud_frame_filter ${PCL_LIBRARIES})
 
 # Add executables
 add_executable(lidar_to_pointcloud_node src/lidar_to_pointcloud_node.cpp)
 ament_target_dependencies(lidar_to_pointcloud_node ${dependencies})
 target_link_libraries(lidar_to_pointcloud_node ${PCL_LIBRARIES})
 
-add_executable(pointcloud_aggregator_node src/pointcloud_aggregator_node.cpp)
-ament_target_dependencies(pointcloud_aggregator_node ${dependencies})
-target_link_libraries(pointcloud_aggregator_node ${PCL_LIBRARIES})
+add_executable(pointcloud_frame_filter_node src/pointcloud_frame_filter_node.cpp)
+ament_target_dependencies(pointcloud_frame_filter_node ${dependencies})
+target_link_libraries(pointcloud_frame_filter_node pointcloud_frame_filter ${PCL_LIBRARIES})
 
 # Install targets
 install(TARGETS
   lidar_to_pointcloud_node
-  pointcloud_aggregator_node
+  pointcloud_frame_filter_node
+  pointcloud_frame_filter
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -68,6 +76,7 @@ install(DIRECTORY
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
@@ -77,6 +86,8 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+  ament_add_gtest(test_pointcloud_frame_filter test/test_pointcloud_frame_filter.cpp)
+  target_link_libraries(test_pointcloud_frame_filter pointcloud_frame_filter ${PCL_LIBRARIES})
 endif()
 
 ament_package()

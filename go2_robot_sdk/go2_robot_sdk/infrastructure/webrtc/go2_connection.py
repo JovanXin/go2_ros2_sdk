@@ -12,6 +12,7 @@ Big thanks to @tfoldi (Földi Tamás) and @legion1581 (The RoboVerse Discord Gro
 import asyncio
 import json
 import logging
+import time
 import base64
 from typing import Callable, Optional, Any, Dict, Union
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
@@ -49,6 +50,7 @@ class Go2Connection:
         self.robot_num = str(robot_num)
         self.token = token
         self.aes_key = aes_key
+        self._heartbeat_handle = None
         self.robot_validation = "PENDING"
         self.validation_result = "PENDING"
         
@@ -65,6 +67,7 @@ class Go2Connection:
         
         # Setup data channel
         self.data_channel = self.pc.createDataChannel("data", id=0)
+        self.data_channel.on("close", self._stop_heartbeat)
         self.data_channel.on("open", self.on_data_channel_open)
         self.data_channel.on("message", self.on_data_channel_message)
         
@@ -78,11 +81,27 @@ class Go2Connection:
     
     def on_connection_state_change(self) -> None:
         """Handle peer connection state changes"""
-        logger.info(f"Connection state is {self.pc.connectionState}")
+        logger.warning(f"Robot {self.robot_num} WebRTC connection state: {self.pc.connectionState}")
         
+        if self.pc.connectionState in ("closed", "failed"):
+            self._stop_heartbeat()
         # Note: Validation is handled after successful WebRTC connection
         # in the original implementation, not here
     
+    def _stop_heartbeat(self) -> None:
+        if self._heartbeat_handle is not None:
+            self._heartbeat_handle.cancel()
+            self._heartbeat_handle = None
+
+    def _send_heartbeat(self) -> None:
+        self._heartbeat_handle = None
+        if self.data_channel.readyState != "open":
+            return
+        now = time.time()
+        self.publish("", {"timeInStr": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+                          "timeInNum": int(now)}, "heartbeat")
+        self._heartbeat_handle = asyncio.get_running_loop().call_later(2.0, self._send_heartbeat)
+
     def on_data_channel_open(self) -> None:
         """Handle data channel open event"""
         logger.info("Data channel is open")
@@ -97,7 +116,7 @@ class Go2Connection:
     def on_data_channel_message(self, message: Union[str, bytes]) -> None:
         """Handle incoming data channel messages"""
         try:
-            logger.debug(f"Received message: {message}")
+            logger.debug("Received message: %s", message)
             
             # Ensure data channel is marked as open
             if self.data_channel.readyState != "open":
@@ -111,6 +130,8 @@ class Go2Connection:
                     msgobj = json.loads(message)
                     if msgobj.get("type") == "validation":
                         self.validate_robot_conn(msgobj)
+                    elif msgobj.get("type") == "res":
+                        self._log_api_response(msgobj)
                 except json.JSONDecodeError:
                     logger.warning("Failed to decode JSON message")
                     
@@ -125,6 +146,24 @@ class Go2Connection:
         except Exception as e:
             logger.error(f"Error processing data channel message: {e}")
     
+    def _log_api_response(self, message: Dict[str, Any]) -> None:
+        """Expose robot acknowledgements without flooding logs at movement rate."""
+        data = message.get("data") or {}
+        if not isinstance(data, dict):
+            return
+        header = data.get("header") or {}
+        identity = header.get("identity") or {}
+        status = header.get("status") or {}
+        key = (message.get("topic"), identity.get("api_id"), status.get("code"))
+        seen = getattr(self, "_reported_api_responses", set())
+        if key in seen:
+            return
+        seen.add(key)
+        self._reported_api_responses = seen
+        logger.warning("Robot API response: topic=%s api_id=%s code=%s", *key)
+        if key[0] == "rt/api/motion_switcher/response" and key[1] == 1001:
+            logger.warning("Robot motion mode: %s", data.get("data"))
+
     async def on_track(self, track: MediaStreamTrack) -> None:
         """Handle incoming media tracks (video)"""
         logger.info("Receiving video")
@@ -139,8 +178,17 @@ class Go2Connection:
         """Handle robot validation response"""
         try:
             if message.get("data") == "Validation Ok.":
-                # Turn on video
-                self.publish("", "on", "vid")
+                # Only send session setup once the data channel is validated.
+                self.publish("", "on" if self.on_video_frame else "off", "vid")
+                self.publish("", {"req_type": "disable_traffic_saving",
+                                  "instruction": "on"}, "rtc_inner_req")
+                self._stop_heartbeat()
+                self._send_heartbeat()
+                # Read-only diagnostic: report active firmware motion service.
+                self.publish("rt/api/motion_switcher/request",
+                             {"header": {"identity": {"id": int(time.time() * 1000),
+                                                       "api_id": 1001}},
+                              "parameter": "{}"}, "req")
                 
                 self.validation_result = "SUCCESS"
                 self.robot_validation = "OK"
@@ -350,6 +398,7 @@ class Go2Connection:
     async def disconnect(self) -> None:
         """Close WebRTC connection and cleanup resources"""
         try:
+            self._stop_heartbeat()
             # Close peer connection
             await self.pc.close()
             

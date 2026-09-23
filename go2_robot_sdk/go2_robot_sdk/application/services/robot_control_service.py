@@ -37,7 +37,10 @@ class RobotControlService:
         """Process WebRTC request"""
         try:
             parameter = "" if parameter_str == "" else json.loads(parameter_str)
-            self.controller.send_webrtc_request(robot_id, api_id, parameter, topic)
+            if msg_id:
+                self.controller.send_webrtc_request(robot_id, api_id, parameter, topic, command_id=int(msg_id))
+            else:
+                self.controller.send_webrtc_request(robot_id, api_id, parameter, topic)
             logger.info(f"WebRTC request sent to robot {robot_id}")
         except ValueError as e:
             logger.error(f"Invalid JSON in WebRTC request: {e}")

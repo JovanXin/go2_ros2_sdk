@@ -5,6 +5,7 @@ import logging
 import math
 from typing import Dict, Any
 
+
 from ...domain.entities import RobotData, RobotState, IMUData, OdometryData, JointData, LidarData
 from ...domain.interfaces import IRobotDataPublisher
 from ...domain.constants import RTC_TOPIC
@@ -17,6 +18,7 @@ class RobotDataService:
 
     def __init__(self, publisher: IRobotDataPublisher):
         self.publisher = publisher
+        self._lidar_resolution_reported = False
 
     def process_webrtc_message(self, msg: Dict[str, Any], robot_id: str) -> None:
         """Process WebRTC message"""
@@ -49,11 +51,36 @@ class RobotDataService:
         try:
             decoded_data = msg.get("decoded_data", {})
             data = msg.get("data", {})
-            
+            reported_resolution = data.get("resolution")
+            lidar_resolution = reported_resolution if reported_resolution is not None else 0.0
+
+            if not self._lidar_resolution_reported:
+                try:
+                    resolution_m = float(reported_resolution)
+                    resolution_text = (
+                        f"{resolution_m:.6f} m ({resolution_m * 1000.0:.2f} mm)"
+                    )
+                except (TypeError, ValueError):
+                    resolution_text = (
+                        "MISSING"
+                        if reported_resolution is None
+                        else f"INVALID VALUE {reported_resolution!r}"
+                    )
+
+                print(
+                    "\n"
+                    + "=" * 78
+                    + f"\nGO2 LIDAR SOURCE VOXEL RESOLUTION: {resolution_text}\n"
+                    + "Robot packet metadata; unrelated to RViz PointCloud2 Size (m).\n"
+                    + "=" * 78,
+                    flush=True,
+                )
+                self._lidar_resolution_reported = True
+
             robot_data.lidar_data = LidarData(
                 positions=decoded_data.get("positions"),
                 uvs=decoded_data.get("uvs"),
-                resolution=data.get("resolution", 0.0),
+                resolution=lidar_resolution,
                 origin=data.get("origin", [0.0, 0.0, 0.0]),
                 stamp=data.get("stamp", 0.0),
                 width=data.get("width"),
@@ -62,6 +89,7 @@ class RobotDataService:
             )
         except Exception as e:
             logger.error(f"Error processing lidar data: {e}")
+
 
     def _process_odometry_data(self, msg: Dict[str, Any], robot_data: RobotData) -> None:
         """Process odometry data"""
@@ -78,9 +106,20 @@ class RobotDataService:
                 logger.warning("Invalid odometry data - skipping")
                 return
 
+            # PoseStamped's robot clock is suitable for time differences even
+            # when its epoch differs from the host ROS clock.
+            stamp = msg['data'].get('header', {}).get('stamp', {})
+            measurement_stamp = None
+            if isinstance(stamp, dict):
+                sec, nanosec = stamp.get('sec'), stamp.get('nanosec')
+                if (isinstance(sec, (int, float)) and isinstance(nanosec, (int, float))
+                        and math.isfinite(sec) and math.isfinite(nanosec)
+                        and 0 <= nanosec < 1e9 and sec + nanosec / 1e9 > 0):
+                    measurement_stamp = sec + nanosec / 1e9
             robot_data.odometry_data = OdometryData(
                 position=position,
-                orientation=orientation
+                orientation=orientation,
+                measurement_stamp=measurement_stamp,
             )
         except Exception as e:
             logger.error(f"Error processing odometry data: {e}")

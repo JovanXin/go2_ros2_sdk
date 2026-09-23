@@ -8,6 +8,8 @@ Implements clean architecture with real-time data publishing
 
 import asyncio
 import threading
+import signal
+from rclpy.signals import SignalHandlerOptions
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 
@@ -57,13 +59,20 @@ async def spin_node(node: Go2DriverNode):
         while rclpy.ok():
             await asyncio.sleep(0.1)
     finally:
+        executor.shutdown(timeout_sec=1.0)
         thread.join(timeout=1.0)
 
 
 async def main_async():
     """Main asynchronous function"""
     # Initialize ROS2
-    rclpy.init()
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    previous_handlers = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[sig] = signal.getsignal(sig)
+        loop.add_signal_handler(sig, stop_event.set)
 
     try:
         # Create node with current event loop
@@ -73,10 +82,11 @@ async def main_async():
         # Run ROS2 node and robot connections in parallel
         ros_task = asyncio.create_task(spin_node(node))
         robot_task = asyncio.create_task(run_robot_connections(node))
+        stop_task = asyncio.create_task(stop_event.wait())
 
         # Wait for any task to complete
         done, pending = await asyncio.wait(
-            [ros_task, robot_task],
+            [ros_task, robot_task, stop_task],
             return_when=asyncio.FIRST_COMPLETED
         )
 
@@ -106,11 +116,15 @@ async def main_async():
         try:
             # Disconnect from robots
             if 'node' in locals() and hasattr(node, 'webrtc_adapter'):
-                for robot_id in node.webrtc_adapter.connections:
-                    await node.webrtc_adapter.disconnect(robot_id)
+                for robot_id in list(node.webrtc_adapter.connections):
+                    try:
+                        await asyncio.wait_for(node.webrtc_adapter.disconnect(robot_id), timeout=3.0)
+                    except Exception as error:
+                        print(f"Error closing robot {robot_id}: {error}")
             
             # Close unfinished tasks
-            tasks = [t for t in asyncio.all_tasks() if not t.done()]
+            tasks = [t for t in asyncio.all_tasks()
+                     if t is not asyncio.current_task() and not t.done()]
             if tasks:
                 for task in tasks:
                     task.cancel()
@@ -119,7 +133,10 @@ async def main_async():
         except Exception as e:
             print(f"Error during cleanup: {e}")
         finally:
-            rclpy.shutdown()
+            rclpy.try_shutdown()
+            for sig, handler in previous_handlers.items():
+                loop.remove_signal_handler(sig)
+                signal.signal(sig, handler)
 
 
 def main():

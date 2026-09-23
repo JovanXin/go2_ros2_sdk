@@ -36,6 +36,7 @@ class OdometryData:
     """Odometry data"""
     position: Dict[str, float]  # x, y, z
     orientation: Dict[str, float]  # x, y, z, w (quaternion)
+    measurement_stamp: Optional[float] = None
 
 
 @dataclass

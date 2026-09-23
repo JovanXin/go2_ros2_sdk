@@ -4,6 +4,9 @@
 import asyncio
 import logging
 import os
+import time
+import json
+from std_msgs.msg import String
 from typing import Dict, Any
 
 from aiortc import MediaStreamTrack
@@ -21,9 +24,11 @@ from go2_interfaces.msg import LowState, VoxelMapCompressed, WebRtcReq
 from sensor_msgs.msg import PointCloud2, JointState, Joy, Image, CameraInfo
 from nav_msgs.msg import Odometry
 
+from ..domain.constants import RTC_TOPIC
 from ..domain.entities import RobotConfig, RobotData, CameraData
 from ..application.services import RobotDataService, RobotControlService
 from ..infrastructure.ros2 import ROS2Publisher
+from ..infrastructure.ros2.telemetry_buffer import LatestTelemetry
 from ..infrastructure.webrtc import WebRTCAdapter
 
 logging.basicConfig(level=logging.WARN)
@@ -37,6 +42,17 @@ class Go2DriverNode(Node):
     def __init__(self, event_loop=None):
         super().__init__('go2_driver_node')  # Clean architecture main driver
         self.event_loop = event_loop
+        self._telemetry_received = {}
+        self._connection_started = {}
+        self.trace_transport = False
+        self._last_transport_pose_log = 0.0
+        # ROS serialization/publishing must not block the WebRTC receive loop.
+        # Body pose remains 20 Hz; joint animation does not need the full input rate.
+        self._latest_telemetry = LatestTelemetry({
+            RTC_TOPIC['ROBOTODOM']: 20.0, RTC_TOPIC['LF_SPORT_MOD_STATE']: 10.0,
+            RTC_TOPIC['LOW_STATE']: 5.0, RTC_TOPIC['ULIDAR_ARRAY']: 10.0,
+        })
+        self.api_responses = self.create_publisher(String, "sdk_api_responses", 10)
         
         # Configuration initialization
         self.config = self._setup_configuration()
@@ -63,6 +79,7 @@ class Go2DriverNode(Node):
             event_loop=self.event_loop
         )
         
+        self.webrtc_adapter.command_sent_callback = self._trace_command_sent
         self.robot_control_service = RobotControlService(self.webrtc_adapter)
         
         # Set callback for data
@@ -70,6 +87,7 @@ class Go2DriverNode(Node):
         
         # Subscribers initialization
         self._setup_subscribers()
+        self.create_timer(0.02, self._publish_latest_telemetry)
         
         # State
         self.joy_state = Joy()
@@ -90,6 +108,7 @@ class Go2DriverNode(Node):
                 ('aes_key', aes_key),
                 ('conn_type', conn_type),
                 ('enable_video', True),
+                ('trace_transport', False),
                 ('decode_lidar', True),
                 ('publish_raw_voxel', False),
                 ('obstacle_avoidance', False),
@@ -239,6 +258,8 @@ class Go2DriverNode(Node):
 
         try:
             for p in params:
+                if p.name == 'trace_transport':
+                    self.trace_transport = bool(p.value)
                 if p.name == 'obstacle_avoidance':
                     self.get_logger().info(f'New obstacle_avoidance value: {p.value}')
                     self.config.obstacle_avoidance = p.value
@@ -282,9 +303,45 @@ class Go2DriverNode(Node):
         """Callback after robot validation"""
         self.get_logger().info(f"Robot {robot_id} validated and ready")
 
+    def _trace_command_sent(self, command: str, buffered_bytes: int) -> None:
+        if not self.trace_transport:
+            return
+        packet = json.loads(command)
+        if packet.get('topic') not in ('rt/api/sport/request', 'rt/api/obstacles_avoid/request'):
+            return
+        data = packet.get('data', {})
+        self.get_logger().info('NAV_TRANSPORT ' + json.dumps({
+            'event': 'send', 'time': time.time(), 'topic': packet['topic'],
+            'identity': data.get('header', {}).get('identity'),
+            'parameter': data.get('parameter'), 'buffered_bytes': buffered_bytes,
+            'pending_requests': self.webrtc_adapter.webrtc_msgs.qsize(),
+        }))
+
     def _on_robot_data_received(self, msg: Dict[str, Any], robot_id: str) -> None:
         """Callback for receiving data from robot"""
-        self.robot_data_service.process_webrtc_message(msg, robot_id)
+        if isinstance(msg, dict) and msg.get("topic") in (
+            RTC_TOPIC["ROBOTODOM"], RTC_TOPIC["LF_SPORT_MOD_STATE"],
+            RTC_TOPIC["ULIDAR_ARRAY"], RTC_TOPIC["LOW_STATE"],
+        ):
+            self._telemetry_received[robot_id] = time.monotonic()
+        if isinstance(msg, dict) and msg.get("type") == "res":
+            self.api_responses.publish(String(data=json.dumps(msg)))
+            return
+        if (self.trace_transport and isinstance(msg, dict)
+                and msg.get('topic') == RTC_TOPIC['ROBOTODOM']
+                and time.monotonic() - self._last_transport_pose_log >= 1.0):
+            self._last_transport_pose_log = time.monotonic()
+            self.get_logger().info('NAV_TRANSPORT ' + json.dumps({
+                'event': 'pose', 'time': time.time(),
+                'source_header': msg.get('data', {}).get('header'),
+                'pose': msg.get('data', {}).get('pose'),
+            }))
+        if isinstance(msg, dict):
+            self._latest_telemetry.put(robot_id, msg.get('topic'), msg)
+
+    def _publish_latest_telemetry(self) -> None:
+        for robot_id, msg in self._latest_telemetry.take_ready(time.monotonic()):
+            self.robot_data_service.process_webrtc_message(msg, robot_id)
 
     async def _on_video_frame(self, track: MediaStreamTrack, robot_id: str) -> None:
         """Callback for processing video frames"""
@@ -338,6 +395,7 @@ class Go2DriverNode(Node):
         if self.config.conn_type == 'webrtc':
             for i, robot_ip in enumerate(self.config.robot_ip_list):
                 try:
+                    self._connection_started[str(i)] = time.monotonic()
                     await self.webrtc_adapter.connect(str(i))
                 except Exception as e:
                     self.get_logger().error(f"Failed to connect to robot {i}: {e}")
@@ -347,6 +405,17 @@ class Go2DriverNode(Node):
         """Main robot control loop"""
         while True:
             try:
+                # Let the gateway's 2.5 s sensor watchdog latch STOP before
+                # exiting. The launch supervisor starts a fresh process (empty
+                # command queue) after 5 s; it never resumes exploration itself.
+                last = self._telemetry_received.get(robot_id)
+                started = self._connection_started.get(robot_id, time.monotonic())
+                if (last is not None and time.monotonic() - last > 5.0) or (
+                    last is None and time.monotonic() - started > 20.0
+                ):
+                    raise RuntimeError(
+                        f"Robot {robot_id} WebRTC telemetry stopped; exiting for a fresh connection"
+                    )
                 # Process joystick commands
                 if self.joy_state.buttons:
                     self.robot_control_service.handle_joy_command(

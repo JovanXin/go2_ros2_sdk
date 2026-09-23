@@ -23,6 +23,7 @@ class WebRTCAdapter(IRobotDataReceiver, IRobotController):
         self.connections: Dict[str, Go2Connection] = {}
         self.data_callback: Callable[[RobotData], None] = None
         self.webrtc_msgs = asyncio.Queue()
+        self.command_sent_callback = None
         self.on_validated_callback = on_validated_callback
         self.on_video_frame_callback = on_video_frame_callback
         # Store the event loop (passed from main thread or detect current)
@@ -53,7 +54,7 @@ class WebRTCAdapter(IRobotDataReceiver, IRobotController):
             
             self.connections[robot_id] = conn
             await conn.connect()
-            await conn.disableTrafficSaving(True)
+            # Session setup is sent after data-channel validation, not SDP exchange.
             
             logger.info(f"Connected to robot {robot_id} at {robot_ip}")
             
@@ -117,6 +118,8 @@ class WebRTCAdapter(IRobotDataReceiver, IRobotController):
         try:
             if hasattr(connection, 'data_channel') and connection.data_channel:
                 connection.data_channel.send(command)
+                if self.command_sent_callback is not None:
+                    self.command_sent_callback(command, connection.data_channel.bufferedAmount)
         except Exception as e:
             logger.error(f"Error in async send command: {e}")
 
@@ -152,10 +155,10 @@ class WebRTCAdapter(IRobotDataReceiver, IRobotController):
         except Exception as e:
             logger.error(f"Error sending stand down command: {e}")
 
-    def send_webrtc_request(self, robot_id: str, api_id: int, parameter: Any, topic: str) -> None:
+    def send_webrtc_request(self, robot_id: str, api_id: int, parameter: Any, topic: str, command_id=None) -> None:
         """Send WebRTC request"""
         try:
-            payload = gen_command(api_id, parameter, topic)
+            payload = gen_command(api_id, parameter, topic, command_id=command_id)
             self.webrtc_msgs.put_nowait(payload)
             logger.debug(f"WebRTC request queued for robot {robot_id}")
         except Exception as e:
@@ -177,7 +180,11 @@ class WebRTCAdapter(IRobotDataReceiver, IRobotController):
         """Callback after connection validation"""
         try:
             if robot_id in self.connections:
-                for topic in RTC_TOPIC.values():
+                # Subscribe only to streams consumed by RobotDataService. The
+                # full table also contains bulky maps and outbound command topics.
+                topics = (RTC_TOPIC["LOW_STATE"], RTC_TOPIC["ROBOTODOM"],
+                          RTC_TOPIC["LF_SPORT_MOD_STATE"], RTC_TOPIC["ULIDAR_ARRAY"])
+                for topic in topics:
                     self.connections[robot_id].data_channel.send(
                         json.dumps({"type": "subscribe", "topic": topic}))
             

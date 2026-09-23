@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import logging
+from array import array
 
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
@@ -19,6 +20,7 @@ from ...domain.interfaces import IRobotDataPublisher
 from ...domain.entities import RobotData, RobotConfig
 from ..sensors.lidar_decoder import update_meshes_for_cloud2
 from ..sensors.camera_config import load_camera_info
+from .odometry_velocity import OdometryVelocity
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ class ROS2Publisher(IRobotDataPublisher):
         self.broadcaster = broadcaster
         self.bridge = CvBridge()
         self.camera_info = load_camera_info()
+        self._odometry_velocity = {}
 
     def publish_odometry(self, robot_data: RobotData) -> None:
         """Publish odometry data"""
@@ -42,19 +45,32 @@ class ROS2Publisher(IRobotDataPublisher):
         try:
             robot_idx = int(robot_data.robot_id)
             
-            # Publish transform
-            self._publish_transform(robot_data, robot_idx)
+            # TF and Odometry describe the same measurement instant.
+            stamp = self.node.get_clock().now().to_msg()
+            source_stamp = robot_data.odometry_data.measurement_stamp
+            if source_stamp is not None:
+                now = stamp.sec + stamp.nanosec / 1e9
+                # The robot publishes an epoch timestamp. Preserve it: restamping
+                # queued poses as "now" conceals seconds of feedback latency.
+                # Small positive clock skew is clamped; large skew is unusable.
+                if source_stamp > now + 1.0:
+                    logger.warning('Robot odometry clock is ahead of ROS; dropping pose')
+                    return
+                measurement_time = min(now, source_stamp)
+                stamp.sec = int(measurement_time)
+                stamp.nanosec = int((measurement_time - stamp.sec) * 1e9)
+            self._publish_transform(robot_data, robot_idx, stamp)
             
             # Publish odometry topic
-            self._publish_odometry_topic(robot_data, robot_idx)
+            self._publish_odometry_topic(robot_data, robot_idx, stamp)
             
         except Exception as e:
             logger.error(f"Error publishing odometry: {e}")
 
-    def _publish_transform(self, robot_data: RobotData, robot_idx: int) -> None:
+    def _publish_transform(self, robot_data: RobotData, robot_idx: int, stamp=None) -> None:
         """Publish TF transform"""
         odom_trans = TransformStamped()
-        odom_trans.header.stamp = self.node.get_clock().now().to_msg()
+        odom_trans.header.stamp = stamp if stamp is not None else self.node.get_clock().now().to_msg()
         odom_trans.header.frame_id = 'odom'
 
         if self.config.conn_mode == 'single':
@@ -76,10 +92,10 @@ class ROS2Publisher(IRobotDataPublisher):
 
         self.broadcaster.sendTransform(odom_trans)
 
-    def _publish_odometry_topic(self, robot_data: RobotData, robot_idx: int) -> None:
+    def _publish_odometry_topic(self, robot_data: RobotData, robot_idx: int, stamp=None) -> None:
         """Publish Odometry topic"""
         odom_msg = Odometry()
-        odom_msg.header.stamp = self.node.get_clock().now().to_msg()
+        odom_msg.header.stamp = stamp if stamp is not None else self.node.get_clock().now().to_msg()
         odom_msg.header.frame_id = 'odom'
 
         if self.config.conn_mode == 'single':
@@ -99,6 +115,24 @@ class ROS2Publisher(IRobotDataPublisher):
         odom_msg.pose.pose.orientation.z = float(orientation['z'])
         odom_msg.pose.pose.orientation.w = float(orientation['w'])
 
+        # Nav2 consumes twist in child_frame_id (base_link), not in odom.
+        # The robot sends PoseStamped, so derive measured twist from pose history.
+        source_stamp = robot_data.odometry_data.measurement_stamp
+        clock_kind = 'robot' if source_stamp is not None else 'host'
+        previous_kind, estimator = self._odometry_velocity.get(robot_idx, (None, None))
+        if estimator is None or previous_kind != clock_kind:
+            estimator = OdometryVelocity()
+            self._odometry_velocity[robot_idx] = (clock_kind, estimator)
+        measurement_stamp = source_stamp if source_stamp is not None else (
+            odom_msg.header.stamp.sec + odom_msg.header.stamp.nanosec / 1e9)
+        velocity = estimator.update(measurement_stamp, position, orientation)
+        if velocity is not None:
+            odom_msg.twist.twist.linear.x, odom_msg.twist.twist.linear.y, \
+                odom_msg.twist.twist.angular.z = velocity
+        # Planar estimates only. Unknown startup/reset samples are marked uncertain.
+        for index in (0, 7, 14, 21, 28, 35):
+            odom_msg.twist.covariance[index] = (
+                0.1 if velocity is not None and index in (0, 7, 35) else 1e6)
         self.publishers['odometry'][robot_idx].publish(odom_msg)
 
     def publish_joint_state(self, robot_data: RobotData) -> None:
@@ -260,7 +294,7 @@ class ROS2Publisher(IRobotDataPublisher):
             voxel_msg.origin = lidar.origin
             voxel_msg.width = lidar.width or []
             voxel_msg.src_size = lidar.src_size or 0
-            voxel_msg.data = lidar.compressed_data or b''
+            voxel_msg.data = array('B', lidar.compressed_data or b'')
 
             self.publishers['voxel'][robot_idx].publish(voxel_msg)
 

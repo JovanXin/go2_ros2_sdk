@@ -1,0 +1,14 @@
+diff --git a/src/aioice/stun.py b/src/aioice/stun.py
+index 1a24ed3..ac435ac 100644
+--- a/src/aioice/stun.py
++++ b/src/aioice/stun.py
+@@ -302,6 +302,9 @@ class Transaction:
+                 self.__timeout_handle.cancel()
+ 
+     def __retry(self) -> None:
++        # Cancellation/response can win the race with an already queued timer.
++        if self.__future.done():
++            return
+         if self.__tries >= self.__tries_max:
+             self.__future.set_exception(TransactionTimeout())
+             return

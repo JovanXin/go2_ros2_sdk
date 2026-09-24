@@ -1,0 +1,35 @@
+# RTAB-Map parameters for Go2 robot
+# Values + param naming follow the upstream rtabmap_ros demos:
+#   https://github.com/introlab/rtabmap_ros (ros2 branch, turtlebot3_scan.launch.py / lidar3d.launch.py)
+#
+# IMPORTANT: RTAB-Map internal params are STRINGS, not native types.
+#
+# Loaded by: ros2 launch go2_robot_sdk rtabmap_mapping.launch.py
+# Requires:  sudo apt install ros-humble-rtabmap-ros
+
+rtabmap:
+  ros__parameters:
+    # Frames — robot driver publishes TF odom->base_link
+    frame_id: base_link
+    odom_frame_id: odom
+    map_frame_id: map
+
+    # Data mode (set by launch arg scan2d):
+    #   scan2d=false (default): consume 3D point cloud  /pointcloud/current_filtered
+    #   scan2d=true:            consume 2D laser scan   /scan  (like upstream turtlebot3_scan)
+    subscribe_depth: false
+    subscribe_rgb: false
+    approx_sync: true
+    use_action_for_goal: true
+
+    # Loop closure / graph — 2D-style tuning from upstream scan demo
+    Reg/Strategy: '1'
+    Reg/Force3DoF: 'true'
+    RGBD/NeighborLinkRefining: 'True'
+    Optimizer/GravitySigma: '0'
+
+    # Occupancy grid (2D /map for nav2 + frontier explorer)
+    Grid/RangeMin: '0.2'
+
+    # Delete previous database at startup (fresh mapping session)
+    # (launch appends -d when not in localization mode)

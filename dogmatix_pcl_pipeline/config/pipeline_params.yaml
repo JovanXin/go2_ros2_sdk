@@ -1,0 +1,21 @@
+# Pipeline parameters for Dogmatix PCL Pipeline
+
+dogmatix_pcl_pipeline:
+  ros__parameters:
+    # Input topic (PointCloud2 from LIDAR)
+    input_topic: /pointcloud
+
+    # Output directory for floorplan files
+    output_dir: /tmp/dogmatix
+
+    # Point cloud processing
+    voxel_size: 0.01  # meters — downsampling resolution
+    ransac_distance_threshold: 0.02  # meters — plane fitting tolerance
+
+    # Wall detection
+    wall_thickness: 0.15  # meters — assumed wall thickness for floorplan
+    merge_distance: 0.3  # meters — merge walls closer than this
+    min_wall_length: 0.5  # meters — ignore walls shorter than this
+
+    # Process each incoming cloud (true) or wait for service call (false)
+    process_on_receive: false

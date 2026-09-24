@@ -38,7 +38,7 @@ If you are using WebRTC (Wi-Fi) protocol, close the connection with a mobile app
 15. SLAM (slam_toolbox) :white_check_mark:
 16. Navigation (nav2) :white_check_mark:
 17. Object detection (coco) :white_check_mark:
-18. AutoPilot
+18. AutoPilot :white_check_mark:
 
 ## Your feedback and support mean the world to us. 
 
@@ -155,7 +155,7 @@ The `robot.launch.py` code starts many services/nodes simultaneously, including
 * ros2_go2_video (front color camera)
 * pointcloud_to_laserscan_node
 * go2_robot_sdk/go2_driver_node
-* lidar_processor/lidar_to_pointcloud
+* lidar_processor_cpp/lidar_to_pointcloud_node (accumulates + saves the 3D map)
 * rviz2
 * `joy` (ROS2 Driver for Generic Joysticks and Game Controllers)
 * `teleop_twist_joy` (facility for tele-operating Twist-based ROS2 robots with a standard joystick. Converts joy messages to velocity commands)       
@@ -218,6 +218,89 @@ You can now give the dog its first target, via 'Nav2 Goal' in the `rviz` menu. U
 Until you have some experience, we suggest following your dog and picking it up when it is about to do something silly.
 
 **NOTE**: Virtually all fault behaviors - spinning in circles, running into walls, trying to walk through walls, etc reflect (1) a map that is incorrect, (2) incorrect initial position/angle of the dog relative to that map, or (3) inability to compute solutions/paths based on overloaded control loops. To prevent #3, which results in no motion or continuous spinning, the key loop rates (`controller_frequency`: 3.0 and `expected_planner_frequency`: 1.0 have been set to very conservative rates). 
+
+### Autonomous Frontier Exploration
+
+The [`frontier_exploration_ros2`](https://github.com/mertgulerx/frontier_exploration_ros2) package (included as a git submodule) enables fully autonomous exploration of unknown environments.  The robot builds a map with SLAM Toolbox while the frontier explorer detects boundaries between free and unknown space ("frontiers"), orders them via an MRTSP-based solver, and navigates to the best candidate via Nav2.  It includes frontier suppression for noisy SLAM, post-goal settle for stability, bilateral-filtered decision maps, and both global and local costmap filtering.
+
+**Build**:
+
+```shell
+source /opt/ros/$ROS_DISTRO/setup.bash
+colcon build
+```
+
+**Launch** autonomous exploration:
+
+```shell
+source install/setup.bash
+export ROBOT_IP="robot_ip"
+export CONN_TYPE="webrtc"
+ros2 launch go2_robot_sdk explore.launch.py
+```
+
+The launch starts the robot, SLAM, Nav2, and the explorer in a stopped state. In RViz, use the **Frontier Exploration** panel and click **Start** when the robot is standing and the map looks correct. Click **Stop** to cancel the active navigation goal and pause exploration. Frontiers are visualised in RViz as blue point clouds (candidates), green points (the selected frontier), and a red sphere (current goal).
+
+To retain the old start-immediately behavior, launch with `autostart:=true`:
+
+```shell
+ros2 launch go2_robot_sdk explore.launch.py autostart:=true
+```
+
+#### Tuning parameters
+
+Go2-specific defaults are in `go2_robot_sdk/config/frontier_params.yaml`.  Override any parameter via the launch file or by editing that file directly.  Key parameters:
+
+| Parameter | Default | Description |
+|---|---|
+| `autostart` | false | Start immediately rather than wait for the RViz Start button |
+| `control_service_enabled` | true | Expose the `/control_exploration` service for the RViz panel |
+| `mrtsp_solver` | greedy | Frontier ordering: `greedy` (fast) or `dp` (optimal, more CPU) |
+| `frontier_suppression_enabled` | true | Suppress repeatedly-failing frontier regions |
+| `post_goal_settle_enabled` | true | Wait for the map to settle after each goal |
+| `escape_enabled` | true | Allow farther fallback frontiers until the first success |
+| `min_frontier_size_cells` | 5 | Minimum cells for a valid frontier cluster |
+| `frontier_selection_min_distance` | 0.75 | Minimum distance (m) to consider a frontier target |
+| `occ_threshold` | 65 | Costmap occupancy threshold for frontier validation (0-100) |
+| `return_to_start_on_complete` | false | Return to the start pose when exploration is complete |
+
+Example with custom values:
+
+```shell
+ros2 launch go2_robot_sdk explore.launch.py autostart:=true
+```
+
+#### Topics
+
+| Topic | Type | Description |
+|---|---|
+| `/frontier_markers` | `visualization_msgs/MarkerArray` | Frontier clusters for RViz |
+| `/explore/selected_frontier` | `geometry_msgs/PoseStamped` | Currently selected frontier target |
+| `/explore/optimized_map` | `nav_msgs/OccupancyGrid` | Decision map after bilateral filtering |
+| `/control_exploration` | `frontier_exploration_ros2/ControlExploration` | Start/stop service with state machine |
+| `exploration_complete` | `std_msgs/String` | Completion event |
+
+#### How it works
+
+1. Subscribes to `/map` (SLAM Toolbox) and `/global_costmap/costmap` (Nav2)
+2. Optionally optimizes the decision map with bilateral filtering and dilation
+3. Runs Wavefront Frontier Detection (WFD) — a two-level BFS that extracts frontier clusters
+4. Filters frontiers against the global and local costmaps
+5. Scores and orders frontiers via the MRTSP solver (greedy or DP)
+6. Selects a safe goal point with footprint clearance
+7. Sends the goal as a `NavigateToPose` action to Nav2
+8. After goal completion, applies post-goal settle and replans
+9. Suppresses regions that repeatedly fail; retries after timeout
+10. Stops when no valid frontiers remain (optionally returns to start)
+
+#### Troubleshooting
+
+- **Robot doesn't move**: Make sure the robot has been commanded to stand up (joystick button 0).  Check that Nav2 is running (`ros2 node list | grep nav2`).
+- **Goal rejected**: The frontier may be unreachable.  The explorer will automatically skip it and try the next one.
+- **Spinning in circles**: Check the SLAM map quality.  An inaccurate map causes Nav2 to plan invalid paths.
+- **Exploration stops too early**: Decrease `min_frontier_size_cells` or increase `frontier_visit_tolerance`.
+- **Too many suppressed frontiers**: Increase `frontier_suppression_timeout_s` or disable suppression entirely.
+- **Robot oscillates between frontiers**: Enable `post_goal_settle_enabled` and increase `post_goal_min_settle`.
 
 ## Real time image detection and tracking
 

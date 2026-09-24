@@ -99,27 +99,31 @@ def generate_launch_description():
                 'map_save': save_map
             }],
         ),
-        # Point cloud aggregator - maximized for full coverage
+        # Stateless current-frame filter for SLAM and obstacle detection
         Node(
             package='lidar_processor_cpp',
-            executable='pointcloud_aggregator_node',
-            name='pointcloud_aggregator',
+            executable='pointcloud_frame_filter_node',
+            name='pointcloud_frame_filter',
+            remappings=[
+                ('cloud_in', '/point_cloud2'),
+                ('cloud_out', '/pointcloud/current_filtered'),
+            ],
             parameters=[{
+                'target_frame': 'base_link',
                 'max_range': 20.0,
                 'min_range': 0.3,
-                'height_filter_min': -1.0,
-                'height_filter_max': 3.0,
-                'downsample_rate': 1,
-                'publish_rate': 20.0
+                'min_height': -1.0,
+                'max_height': 3.0,
+                'voxel_size': 0.005,
             }],
         ),
-        # PointCloud to LaserScan converter - maximum coverage
+        # PointCloud to LaserScan converter consumes only the current frame
         Node(
             package='pointcloud_to_laserscan',
             executable='pointcloud_to_laserscan_node',
             name='go2_pointcloud_to_laserscan',
             remappings=[
-                ('cloud_in', '/pointcloud/filtered'),
+                ('cloud_in', '/pointcloud/current_filtered'),
                 ('scan', '/scan'),
             ],
             parameters=[{

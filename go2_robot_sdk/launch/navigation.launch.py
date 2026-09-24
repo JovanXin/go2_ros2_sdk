@@ -89,41 +89,31 @@ def generate_launch_description():
                 'conn_type': conn_type
             }],
         ),
-        # LiDAR processing node
+        # Stateless current-frame filter; navigation must not accumulate history
         Node(
             package='lidar_processor_cpp',
-            executable='lidar_to_pointcloud_node',
-            name='lidar_to_pointcloud',
+            executable='pointcloud_frame_filter_node',
+            name='pointcloud_frame_filter',
             remappings=[
-                ('robot0/point_cloud2', 'point_cloud2'),
-            ] if conn_mode == 'single' else [],
+                ('cloud_in', '/point_cloud2'),
+                ('cloud_out', '/pointcloud/current_filtered'),
+            ],
             parameters=[{
-                'robot_ip_lst': robot_ip_list,
-                'map_name': '3d_map',
-                'map_save': 'false'  # Don't save during navigation
-            }],
-        ),
-        # Point cloud aggregator - optimized for real-time navigation
-        Node(
-            package='lidar_processor_cpp',
-            executable='pointcloud_aggregator_node',
-            name='pointcloud_aggregator',
-            parameters=[{
+                'target_frame': 'base_link',
                 'max_range': 20.0,
                 'min_range': 0.1,
-                'height_filter_min': -2.0,
-                'height_filter_max': 3.0,
-                'downsample_rate': 1,
-                'publish_rate': 30.0
+                'min_height': -2.0,
+                'max_height': 3.0,
+                'voxel_size': 0.005,
             }],
         ),
-        # PointCloud to LaserScan converter - optimized for real-time
+        # PointCloud to LaserScan converter consumes only the current frame
         Node(
             package='pointcloud_to_laserscan',
             executable='pointcloud_to_laserscan_node',
             name='go2_pointcloud_to_laserscan',
             remappings=[
-                ('cloud_in', '/pointcloud/filtered'),
+                ('cloud_in', '/pointcloud/current_filtered'),
                 ('scan', '/scan'),
             ],
             parameters=[{

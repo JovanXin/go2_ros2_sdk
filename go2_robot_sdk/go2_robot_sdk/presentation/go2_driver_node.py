@@ -21,7 +21,7 @@ from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import Twist, PoseStamped
 from go2_interfaces.msg import Go2State, IMU
 from go2_interfaces.msg import LowState, VoxelMapCompressed, WebRtcReq
-from sensor_msgs.msg import PointCloud2, JointState, Joy, Image, CameraInfo
+from sensor_msgs.msg import BatteryState, PointCloud2, JointState, Joy, Image, CameraInfo
 from nav_msgs.msg import Odometry
 
 from ..domain.constants import RTC_TOPIC
@@ -152,6 +152,7 @@ class Go2DriverNode(Node):
         publishers = {
             'joint_state': [],
             'robot_state': [],
+            'battery': [],
             'lidar': [],
             'odometry': [],
             'imu': [],
@@ -185,6 +186,8 @@ class Go2DriverNode(Node):
                 voxel_topic = f'{prefix}/utlidar/voxel_map_compressed'
 
             # Create publishers
+            battery_topic = 'battery_state' if self.config.conn_mode == 'single' else f'robot{i}/battery_state'
+            publishers['battery'].append(self.create_publisher(BatteryState, battery_topic, qos_profile))
             publishers['joint_state'].append(
                 self.create_publisher(JointState, joint_topic, qos_profile))
             publishers['robot_state'].append(
@@ -339,8 +342,24 @@ class Go2DriverNode(Node):
         if isinstance(msg, dict):
             self._latest_telemetry.put(robot_id, msg.get('topic'), msg)
 
+    def _publish_battery_telemetry(self, msg, robot_id):
+        if msg.get('topic') != RTC_TOPIC['LOW_STATE']:
+            return
+        try:
+            soc = msg['data']['bms_state']['soc']
+            if isinstance(soc, bool) or not isinstance(soc, (int, float)) or not 0 <= soc <= 100:
+                return
+            battery = BatteryState()
+            battery.header.stamp = self.get_clock().now().to_msg()
+            battery.present = True
+            battery.percentage = float(soc) / 100.0
+            self.publishers_dict['battery'][int(robot_id)].publish(battery)
+        except (KeyError, TypeError, ValueError, IndexError):
+            return
+
     def _publish_latest_telemetry(self) -> None:
         for robot_id, msg in self._latest_telemetry.take_ready(time.monotonic()):
+            self._publish_battery_telemetry(msg, robot_id)
             self.robot_data_service.process_webrtc_message(msg, robot_id)
 
     async def _on_video_frame(self, track: MediaStreamTrack, robot_id: str) -> None:

@@ -166,7 +166,7 @@ class Go2NodeFactory:
                 executable='pointcloud_to_laserscan_node',
                 name='go2_pointcloud_to_laserscan',
                 remappings=[
-                    ('cloud_in', 'point_cloud2'),
+                    ('cloud_in', '/pointcloud/current_filtered'),
                     ('scan', 'scan'),
                 ],
                 parameters=[{
@@ -191,29 +191,36 @@ class Go2NodeFactory:
                     'conn_type': self.config.conn_type
                 }],
             ),
-            # LiDAR processing node (new separate package)
+            # Optional map accumulator. It does not feed navigation.
             Node(
-                package='lidar_processor',
-                executable='lidar_to_pointcloud',
+                package='lidar_processor_cpp',
+                executable='lidar_to_pointcloud_node',
                 name='lidar_to_pointcloud',
+                remappings=[
+                    ('robot0/point_cloud2', 'point_cloud2'),
+                ] if self.config.conn_mode == 'single' else [],
                 parameters=[{
                     'robot_ip_lst': self.config.robot_ip_list,
                     'map_name': self.config.map_name,
                     'map_save': self.config.save_map
                 }],
             ),
-            # Advanced point cloud aggregator
+            # Stateless current-frame filter for navigation
             Node(
-                package='lidar_processor',
-                executable='pointcloud_aggregator',
-                name='pointcloud_aggregator',
+                package='lidar_processor_cpp',
+                executable='pointcloud_frame_filter_node',
+                name='pointcloud_frame_filter',
+                remappings=[
+                    ('cloud_in', '/point_cloud2'),
+                    ('cloud_out', '/pointcloud/current_filtered'),
+                ],
                 parameters=[{
+                    'target_frame': 'base_link',
                     'max_range': 20.0,
                     'min_range': 0.1,
-                    'height_filter_min': -2.0,
-                    'height_filter_max': 3.0,
-                    'downsample_rate': 5,
-                    'publish_rate': 10.0
+                    'min_height': -2.0,
+                    'max_height': 3.0,
+                    'voxel_size': 0.005,
                 }],
             ),
             # TTS Node (new separate package)

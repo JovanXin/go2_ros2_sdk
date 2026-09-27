@@ -353,6 +353,14 @@ class Go2DriverNode(Node):
             battery.header.stamp = self.get_clock().now().to_msg()
             battery.present = True
             battery.percentage = float(soc) / 100.0
+            # BatteryState marks unmeasured fields NaN; the message default of 0.0
+            # would read as a real 0 V / 0 A reading.
+            battery.voltage = float('nan')
+            battery.temperature = float('nan')
+            battery.current = float('nan')
+            battery.charge = float('nan')
+            battery.capacity = float('nan')
+            battery.design_capacity = float('nan')
             self.publishers_dict['battery'][int(robot_id)].publish(battery)
         except (KeyError, TypeError, ValueError, IndexError):
             return

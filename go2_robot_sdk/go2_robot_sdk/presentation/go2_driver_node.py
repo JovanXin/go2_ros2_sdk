@@ -15,7 +15,7 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 from rclpy.qos_overriding_options import QoSOverridingOptions
-from rcl_interfaces.msg import SetParametersResult
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from tf2_ros import TransformBroadcaster
 
 from geometry_msgs.msg import Twist, PoseStamped
@@ -28,7 +28,7 @@ from ..domain.constants import RTC_TOPIC
 from ..domain.entities import RobotConfig, RobotData, CameraData
 from ..application.services import RobotDataService, RobotControlService
 from ..infrastructure.ros2 import ROS2Publisher
-from ..infrastructure.ros2.telemetry_buffer import LatestTelemetry
+from ..infrastructure.ros2.telemetry_buffer import LatestTelemetry, TelemetryWakeup
 from ..infrastructure.webrtc import WebRTCAdapter
 
 logging.basicConfig(level=logging.WARN)
@@ -41,7 +41,7 @@ class Go2DriverNode(Node):
 
     def __init__(self, event_loop=None):
         super().__init__('go2_driver_node')  # Clean architecture main driver
-        self.event_loop = event_loop
+        self.event_loop = event_loop or asyncio.get_running_loop()
         self._telemetry_received = {}
         self._connection_started = {}
         self.trace_transport = False
@@ -70,7 +70,10 @@ class Go2DriverNode(Node):
             broadcaster=self.broadcaster
         )
         
-        self.robot_data_service = RobotDataService(self.ros2_publisher)
+        self.robot_data_service = RobotDataService(
+            self.ros2_publisher,
+            publish_joint_states=self.get_parameter('publish_joint_states').value,
+        )
         
         self.webrtc_adapter = WebRTCAdapter(
             config=self.config,
@@ -87,7 +90,9 @@ class Go2DriverNode(Node):
         
         # Subscribers initialization
         self._setup_subscribers()
-        self.create_timer(0.02, self._publish_latest_telemetry)
+        self._telemetry_guard = self.create_guard_condition(self._publish_latest_telemetry)
+        self._telemetry_wakeup = TelemetryWakeup(
+            self._latest_telemetry, self.event_loop, self._telemetry_guard.trigger)
         
         # State
         self.joy_state = Joy()
@@ -108,6 +113,7 @@ class Go2DriverNode(Node):
                 ('aes_key', aes_key),
                 ('conn_type', conn_type),
                 ('enable_video', True),
+                ('publish_joint_states', True, ParameterDescriptor(read_only=True)),
                 ('trace_transport', False),
                 ('decode_lidar', True),
                 ('publish_raw_voxel', False),
@@ -340,7 +346,9 @@ class Go2DriverNode(Node):
                 'pose': msg.get('data', {}).get('pose'),
             }))
         if isinstance(msg, dict):
-            self._latest_telemetry.put(robot_id, msg.get('topic'), msg)
+            if self._latest_telemetry.put(robot_id, msg.get('topic'), msg):
+                # This callback is owned by the WebRTC asyncio loop.
+                self._telemetry_wakeup.received()
 
     def _publish_battery_telemetry(self, msg, robot_id):
         if msg.get('topic') != RTC_TOPIC['LOW_STATE']:
@@ -366,9 +374,12 @@ class Go2DriverNode(Node):
             return
 
     def _publish_latest_telemetry(self) -> None:
-        for robot_id, msg in self._latest_telemetry.take_ready(time.monotonic()):
-            self._publish_battery_telemetry(msg, robot_id)
-            self.robot_data_service.process_webrtc_message(msg, robot_id)
+        try:
+            for robot_id, msg in self._latest_telemetry.take_ready(time.monotonic()):
+                self._publish_battery_telemetry(msg, robot_id)
+                self.robot_data_service.process_webrtc_message(msg, robot_id)
+        finally:
+            self.event_loop.call_soon_threadsafe(self._telemetry_wakeup.published)
 
     async def _on_video_frame(self, track: MediaStreamTrack, robot_id: str) -> None:
         """Callback for processing video frames"""

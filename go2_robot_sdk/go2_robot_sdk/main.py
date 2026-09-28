@@ -112,6 +112,9 @@ async def main_async():
         import traceback
         traceback.print_exc()
     finally:
+        # Stop deadline callbacks before disconnecting/shutting down ROS.
+        if 'node' in locals() and hasattr(node, '_telemetry_wakeup'):
+            node._telemetry_wakeup.close()
         # Resource cleanup
         try:
             # Disconnect from robots

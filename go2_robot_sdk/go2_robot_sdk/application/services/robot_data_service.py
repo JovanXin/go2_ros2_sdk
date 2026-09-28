@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 class RobotDataService:
     """Service for processing and validating robot data"""
 
-    def __init__(self, publisher: IRobotDataPublisher):
+    def __init__(self, publisher: IRobotDataPublisher, publish_joint_states: bool = True):
         self.publisher = publisher
+        self.publish_joint_states = publish_joint_states
         self._lidar_resolution_reported = False
 
     def process_webrtc_message(self, msg: Dict[str, Any], robot_id: str) -> None:
@@ -39,7 +40,7 @@ class RobotDataService:
                 self._process_sport_mode_state(msg, robot_data)
                 self.publisher.publish_robot_state(robot_data)
 
-            elif topic == RTC_TOPIC["LOW_STATE"]:
+            elif topic == RTC_TOPIC["LOW_STATE"] and self.publish_joint_states:
                 self._process_low_state(msg, robot_data)
                 self.publisher.publish_joint_state(robot_data)
 

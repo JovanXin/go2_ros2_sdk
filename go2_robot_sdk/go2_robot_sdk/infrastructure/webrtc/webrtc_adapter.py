@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import queue
 from typing import Callable, Dict, Any
 
 from ...domain.interfaces import IRobotDataReceiver, IRobotController
@@ -18,11 +19,14 @@ logger = logging.getLogger(__name__)
 class WebRTCAdapter(IRobotDataReceiver, IRobotController):
     """WebRTC adapter for robot communication"""
 
+    MAX_COMMANDS_PER_DRAIN = 32
+
     def __init__(self, config: RobotConfig, on_validated_callback: Callable, on_video_frame_callback: Callable = None, event_loop=None):
         self.config = config
         self.connections: Dict[str, Go2Connection] = {}
         self.data_callback: Callable[[RobotData], None] = None
-        self.webrtc_msgs = asyncio.Queue()
+        # ROS produces on the executor thread; asyncio consumes on the link thread.
+        self.webrtc_msgs = queue.Queue()
         self.command_sent_callback = None
         self.on_validated_callback = on_validated_callback
         self.on_video_frame_callback = on_video_frame_callback
@@ -165,15 +169,15 @@ class WebRTCAdapter(IRobotDataReceiver, IRobotController):
             logger.error(f"Error sending WebRTC request: {e}")
 
     def process_webrtc_commands(self, robot_id: str) -> None:
-        """Process WebRTC commands from queue"""
-        while True:
+        """Drain a bounded FIFO batch without starving WebRTC receive tasks."""
+        for _ in range(self.MAX_COMMANDS_PER_DRAIN):
             try:
                 message = self.webrtc_msgs.get_nowait()
                 try:
                     self.send_command(robot_id, message)
                 finally:
                     self.webrtc_msgs.task_done()
-            except asyncio.QueueEmpty:
+            except queue.Empty:
                 break
 
     def _on_validated(self, robot_id: str) -> None:

@@ -21,6 +21,7 @@ from ...domain.entities import RobotData, RobotConfig
 from ..sensors.lidar_decoder import update_meshes_for_cloud2
 from ..sensors.camera_config import load_camera_info
 from .odometry_velocity import OdometryVelocity
+from .robot_clock import RobotClockMapper
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class ROS2Publisher(IRobotDataPublisher):
         self.bridge = CvBridge()
         self.camera_info = load_camera_info()
         self._odometry_velocity = {}
+        self._robot_clock = {}
 
     def publish_odometry(self, robot_data: RobotData) -> None:
         """Publish odometry data"""
@@ -50,13 +52,12 @@ class ROS2Publisher(IRobotDataPublisher):
             source_stamp = robot_data.odometry_data.measurement_stamp
             if source_stamp is not None:
                 now = stamp.sec + stamp.nanosec / 1e9
-                # The robot publishes an epoch timestamp. Preserve it: restamping
-                # queued poses as "now" conceals seconds of feedback latency.
-                # Small positive clock skew is clamped; large skew is unusable.
-                if source_stamp > now + 1.0:
-                    logger.warning('Robot odometry clock is ahead of ROS; dropping pose')
-                    return
-                measurement_time = min(now, source_stamp)
+                # The robot stamps with its own, unsynchronised clock (~1 s behind the
+                # laptop). Restamping on arrival would conceal feedback latency, and the
+                # raw stamp makes every pose look ~1 s old to Nav2. Map it onto the host
+                # clock instead; see RobotClockMapper.
+                mapper = self._robot_clock.setdefault(robot_idx, RobotClockMapper())
+                measurement_time = mapper.to_host(source_stamp, now)
                 stamp.sec = int(measurement_time)
                 stamp.nanosec = int((measurement_time - stamp.sec) * 1e9)
             self._publish_transform(robot_data, robot_idx, stamp)
